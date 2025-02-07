@@ -32,7 +32,7 @@ A distributed client-server architecture for performing matrix operations using 
 ### Installation
 1. Clone the repository
 bash
-git clone https://github.com/yourusername/Client-Server-Architecture-In-GO.git
+git clone https://github.com/saifaleee/Client-Server-Architecture-In-GO.git
 cd Client-Server-Architecture-In-GO
 
 
