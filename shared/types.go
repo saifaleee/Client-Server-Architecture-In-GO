@@ -31,3 +31,9 @@ type WorkerStatus struct {
 	LastHeartbeat int64
 	Available     bool
 }
+
+// WorkerRegistration represents the registration information for a worker
+type WorkerRegistration struct {
+	ID      string
+	Address string
+}

@@ -5,7 +5,7 @@ import (
 	"net/rpc"
 	"time"
 
-	"../shared"
+	"matrix-operations/shared"
 )
 
 type Client struct {
@@ -55,7 +55,7 @@ func main() {
 	}
 
 	// Request addition
-	result, err := client.RequestComputation(shared.Addition, matrix1, matrix2)
+	result, err := client.RequestComputation(shared.Multiplication, matrix1, matrix2)
 	if err != nil {
 		log.Fatal("Computation failed:", err)
 	}

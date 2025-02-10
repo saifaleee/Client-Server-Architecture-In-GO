@@ -2,15 +2,20 @@ package main
 
 import (
 	"log"
+	"net"
 	"net/rpc"
 	"time"
 
-	"../shared"
+	"matrix-operations/shared"
 )
 
 type Worker struct {
 	ID              string
 	coordinatorAddr string
+}
+
+type WorkerRPC struct {
+	worker *Worker
 }
 
 func NewWorker(id string, coordinatorAddr string) *Worker {
@@ -85,6 +90,8 @@ func (w *Worker) ProcessTask(task shared.Task) shared.Result {
 	return result
 }
 
+// ... existing code ...
+
 func (w *Worker) startHeartbeat() {
 	ticker := time.NewTicker(5 * time.Second)
 	for range ticker.C {
@@ -103,8 +110,30 @@ func (w *Worker) startHeartbeat() {
 	}
 }
 
+func (w *WorkerRPC) ProcessTask(task shared.Task, result *shared.Result) error {
+	*result = w.worker.ProcessTask(task)
+	return nil
+}
+
 func main() {
 	worker := NewWorker("worker1", "localhost:1234")
+
+	// Start RPC server
+	workerRPC := &WorkerRPC{worker: worker}
+	server := rpc.NewServer()
+	err := server.RegisterName("Worker", workerRPC)
+	if err != nil {
+		log.Fatal("Failed to register RPC server:", err)
+	}
+
+	// Listen on a random port
+	listener, err := net.Listen("tcp", ":0")
+	if err != nil {
+		log.Fatal("Failed to start listener:", err)
+	}
+
+	workerAddr := listener.Addr().String()
+	log.Printf("Worker listening on %s", workerAddr)
 
 	// Register with coordinator
 	client, err := rpc.Dial("tcp", worker.coordinatorAddr)
@@ -112,8 +141,14 @@ func main() {
 		log.Fatal("Failed to connect to coordinator:", err)
 	}
 
+	registration := shared.WorkerRegistration{
+		ID:      worker.ID,
+		Address: workerAddr,
+	}
+
 	var reply bool
-	err = client.Call("Coordinator.RegisterWorker", worker.ID, &reply)
+	// Pass the registration directly, not as a pointer
+	err = client.Call("Coordinator.RegisterWorker", registration, &reply)
 	if err != nil {
 		log.Fatal("Failed to register worker:", err)
 	}
@@ -121,8 +156,8 @@ func main() {
 	// Start heartbeat
 	go worker.startHeartbeat()
 
-	// Start RPC server to receive tasks
-	// TODO: Implement RPC server for receiving tasks
+	// Serve RPC requests
+	go server.Accept(listener)
 
 	select {} // Keep the worker running
 }
