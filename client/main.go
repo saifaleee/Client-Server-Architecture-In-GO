@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"net/rpc"
 	"time"
@@ -25,20 +26,32 @@ func (c *Client) RequestComputation(operation shared.MatrixOperation, matrix1, m
 	}
 	defer client.Close()
 
+	taskID := fmt.Sprintf("task-%d", time.Now().UnixNano())
 	task := shared.Task{
-		ID:        "task-" + time.Now().String(),
+		ID:        taskID,
 		Operation: operation,
 		Matrix1:   matrix1,
 		Matrix2:   matrix2,
 	}
 
-	var result shared.Result
-	err = client.Call("Coordinator.SubmitTask", &task, &result)
+	// Submit the task
+	var reply shared.Result
+	err = client.Call("Coordinator.SubmitTask", &task, &reply)
 	if err != nil {
 		return nil, err
 	}
 
-	return &result, nil
+	// Poll for results
+	for i := 0; i < 30; i++ { // Try for 30 seconds
+		var result shared.Result
+		err = client.Call("Coordinator.GetResult", taskID, &result)
+		if err == nil {
+			return &result, nil
+		}
+		time.Sleep(1 * time.Second)
+	}
+
+	return nil, fmt.Errorf("timeout waiting for result")
 }
 
 func main() {
@@ -54,11 +67,24 @@ func main() {
 		{7, 8},
 	}
 
-	// Request addition
+	fmt.Println("Matrix 1:")
+	printMatrix(matrix1)
+	fmt.Println("\nMatrix 2:")
+	printMatrix(matrix2)
+
+	// Request multiplication
+	fmt.Println("\nPerforming matrix multiplication...")
 	result, err := client.RequestComputation(shared.Multiplication, matrix1, matrix2)
 	if err != nil {
 		log.Fatal("Computation failed:", err)
 	}
 
-	log.Printf("Result: %v", result.Matrix)
+	fmt.Println("\nResult:")
+	printMatrix(result.Matrix)
+}
+
+func printMatrix(matrix [][]float64) {
+	for _, row := range matrix {
+		fmt.Println(row)
+	}
 }
