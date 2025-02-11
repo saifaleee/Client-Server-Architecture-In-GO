@@ -3,7 +3,9 @@ package main
 import (
 	"fmt"
 	"log"
+	"net"
 	"net/rpc"
+	"os"
 	"time"
 
 	"matrix-operations/shared"
@@ -55,7 +57,32 @@ func (c *Client) RequestComputation(operation shared.MatrixOperation, matrix1, m
 }
 
 func main() {
-	client := NewClient("localhost:1234")
+	var serverAddr string
+	if len(os.Args) > 1 {
+		// Check if the address already includes a port
+		addr := os.Args[1]
+		if _, _, err := net.SplitHostPort(addr); err != nil {
+			// If no port is specified, append the default port
+			serverAddr = addr + ":" + shared.CoordinatorPort
+		} else {
+			serverAddr = addr
+		}
+	} else {
+		fmt.Println("Usage: go run main.go <server-ip>")
+		fmt.Println("Example: go run main.go 192.168.1.100")
+		os.Exit(1)
+	}
+
+	client := NewClient(serverAddr)
+	fmt.Printf("Connecting to coordinator at %s...\n", serverAddr)
+
+	// Test connection
+	testClient, err := rpc.Dial("tcp", serverAddr)
+	if err != nil {
+		log.Fatalf("Failed to connect to coordinator: %v", err)
+	}
+	testClient.Close()
+	fmt.Println("Successfully connected to coordinator!")
 
 	// Example matrices
 	matrix1 := [][]float64{
@@ -74,7 +101,7 @@ func main() {
 
 	// Request multiplication
 	fmt.Println("\nPerforming matrix multiplication...")
-	result, err := client.RequestComputation(shared.Multiplication, matrix1, matrix2)
+	result, err := client.RequestComputation(shared.Addition, matrix1, matrix2)
 	if err != nil {
 		log.Fatal("Computation failed:", err)
 	}

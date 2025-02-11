@@ -32,12 +32,24 @@ def setup_go_modules():
         subprocess.run(["go", "mod", "tidy"])
     print("Go modules setup complete!")
 
+def configure_firewall():
+    if os.name == 'nt':  # Windows
+        print("\nConfiguring Windows Firewall...")
+        script_path = os.path.join(os.path.dirname(__file__), 'scripts', 'configure_firewall.bat')
+        if os.path.exists(script_path):
+            subprocess.run(['runas', '/user:Administrator', script_path], shell=True)
+        else:
+            print("Firewall configuration script not found!")
+
 def main():
     processes = []
     
     try:
         # Setup Go modules first
         setup_go_modules()
+        
+        # Configure firewall
+        configure_firewall()
         
         while True:
             print_header()

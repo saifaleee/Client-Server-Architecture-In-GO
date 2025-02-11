@@ -193,7 +193,6 @@ func main() {
 	coordinator := NewCoordinator()
 	service := &CoordinatorService{coord: coordinator}
 
-	// Start worker timeout checker
 	go service.checkWorkerTimeouts()
 
 	server := rpc.NewServer()
@@ -202,16 +201,44 @@ func main() {
 		log.Fatal("Format of service isn't correct:", err)
 	}
 
-	listener, err := net.Listen("tcp", ":1234")
+	// Find the best IP address to use
+	var bestIP string
+	addrs, err := net.InterfaceAddrs()
+	if err == nil {
+		for _, addr := range addrs {
+			if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+				if ipv4 := ipnet.IP.To4(); ipv4 != nil {
+					// Prefer 192.168.x.x addresses
+					if ipv4[0] == 192 && ipv4[1] == 168 {
+						bestIP = ipv4.String()
+						break
+					}
+					// Otherwise use the first non-loopback IPv4 address
+					if bestIP == "" {
+						bestIP = ipv4.String()
+					}
+				}
+			}
+		}
+	}
+
+	if bestIP == "" {
+		log.Fatal("No suitable network interface found")
+	}
+
+	// Listen on the specific IP
+	listener, err := net.Listen("tcp", bestIP+":"+shared.CoordinatorPort)
 	if err != nil {
 		log.Fatal("Listen error:", err)
 	}
 
-	log.Println("Coordinator started on :1234")
+	fmt.Printf("Coordinator is accessible at: http://%s:%s\n", bestIP, shared.CoordinatorPort)
+
+	// Start accepting connections
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			log.Fatal("Accept error:", err)
+			log.Printf("Accept error: %v", err)
 			continue
 		}
 		go server.ServeConn(conn)

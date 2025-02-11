@@ -4,6 +4,7 @@ import (
 	"log"
 	"net"
 	"net/rpc"
+	"os"
 	"time"
 
 	"matrix-operations/shared"
@@ -90,8 +91,6 @@ func (w *Worker) ProcessTask(task shared.Task) shared.Result {
 	return result
 }
 
-// ... existing code ...
-
 func (w *Worker) startHeartbeat() {
 	ticker := time.NewTicker(5 * time.Second)
 	for range ticker.C {
@@ -116,7 +115,19 @@ func (w *WorkerRPC) ProcessTask(task shared.Task, result *shared.Result) error {
 }
 
 func main() {
-	worker := NewWorker("worker1", "localhost:1234")
+	// Get coordinator's IP from command line or use default
+	coordinatorAddr := shared.LocalCoordinatorAddr
+	if len(os.Args) > 1 {
+		// Append port if not provided
+		addr := os.Args[1]
+		if _, _, err := net.SplitHostPort(addr); err != nil {
+			// If no port is specified, append the default port
+			addr = addr + ":" + shared.CoordinatorPort
+		}
+		coordinatorAddr = addr
+	}
+
+	worker := NewWorker("worker1", coordinatorAddr)
 
 	// Start RPC server
 	workerRPC := &WorkerRPC{worker: worker}
@@ -126,32 +137,45 @@ func main() {
 		log.Fatal("Failed to register RPC server:", err)
 	}
 
-	// Listen on a random port
-	listener, err := net.Listen("tcp", ":0")
+	// Listen on all interfaces with a random port
+	listener, err := net.Listen("tcp", "0.0.0.0:0")
 	if err != nil {
 		log.Fatal("Failed to start listener:", err)
 	}
 
+	// Get the actual address we're listening on
 	workerAddr := listener.Addr().String()
 	log.Printf("Worker listening on %s", workerAddr)
 
-	// Register with coordinator
-	client, err := rpc.Dial("tcp", worker.coordinatorAddr)
-	if err != nil {
-		log.Fatal("Failed to connect to coordinator:", err)
+	// Try to connect to coordinator with retries
+	var client *rpc.Client
+	for attempts := 0; attempts < 5; attempts++ {
+		client, err = rpc.Dial("tcp", worker.coordinatorAddr)
+		if err == nil {
+			break
+		}
+		log.Printf("Attempt %d: Failed to connect to coordinator: %v", attempts+1, err)
+		time.Sleep(2 * time.Second)
 	}
 
+	if err != nil {
+		log.Fatal("Failed to connect to coordinator after retries:", err)
+	}
+
+	// Register with coordinator
 	registration := shared.WorkerRegistration{
 		ID:      worker.ID,
 		Address: workerAddr,
 	}
 
 	var reply bool
-	// Pass the registration directly, not as a pointer
 	err = client.Call("Coordinator.RegisterWorker", registration, &reply)
 	if err != nil {
 		log.Fatal("Failed to register worker:", err)
 	}
+	client.Close()
+
+	log.Printf("Successfully registered with coordinator at %s", worker.coordinatorAddr)
 
 	// Start heartbeat
 	go worker.startHeartbeat()
