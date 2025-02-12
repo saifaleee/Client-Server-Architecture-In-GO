@@ -227,12 +227,10 @@ func main() {
 	}
 
 	// Listen on the specific IP
-	listener, err := net.Listen("tcp", bestIP+":"+shared.CoordinatorPort)
+	listener, err := net.Listen("tcp", "0.0.0.0:1234") // Bind to all interfaces
 	if err != nil {
 		log.Fatal("Listen error:", err)
 	}
-
-	fmt.Printf("Coordinator is accessible at: http://%s:%s\n", bestIP, shared.CoordinatorPort)
 
 	// Start accepting connections
 	for {

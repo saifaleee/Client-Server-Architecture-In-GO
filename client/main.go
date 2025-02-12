@@ -99,8 +99,7 @@ func main() {
 	fmt.Println("\nMatrix 2:")
 	printMatrix(matrix2)
 
-	// Request multiplication
-	fmt.Println("\nPerforming matrix multiplication...")
+	fmt.Println("\nPerforming matrix Addition...")
 	result, err := client.RequestComputation(shared.Addition, matrix1, matrix2)
 	if err != nil {
 		log.Fatal("Computation failed:", err)
