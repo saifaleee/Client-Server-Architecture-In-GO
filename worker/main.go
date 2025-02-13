@@ -1,6 +1,10 @@
 package main
 
 import (
+	"crypto/tls"
+	"crypto/x509"
+	"fmt"
+	"io/ioutil"
 	"log"
 	"net"
 	"net/rpc"
@@ -91,14 +95,19 @@ func (w *Worker) ProcessTask(task shared.Task) shared.Result {
 	return result
 }
 
-func (w *Worker) startHeartbeat() {
+func (w *Worker) startHeartbeat(cert tls.Certificate, caCertPool *x509.CertPool) {
 	ticker := time.NewTicker(5 * time.Second)
 	for range ticker.C {
-		client, err := rpc.Dial("tcp", w.coordinatorAddr)
+		conn, err := tls.Dial("tcp", w.coordinatorAddr, &tls.Config{
+			Certificates:       []tls.Certificate{cert},
+			RootCAs:            caCertPool,
+			InsecureSkipVerify: false,
+		})
 		if err != nil {
 			log.Printf("Failed to connect to coordinator: %v", err)
 			continue
 		}
+		client := rpc.NewClient(conn)
 
 		var reply bool
 		err = client.Call("Coordinator.Heartbeat", w.ID, &reply)
@@ -114,14 +123,29 @@ func (w *WorkerRPC) ProcessTask(task shared.Task, result *shared.Result) error {
 	return nil
 }
 
+func loadTLSConfig() (tls.Certificate, *x509.CertPool, error) {
+	// Load the worker's certificate and private key
+	cert, err := tls.LoadX509KeyPair("server.pem", "server.pem")
+	if err != nil {
+		return tls.Certificate{}, nil, fmt.Errorf("failed to load worker certificate: %v", err)
+	}
+
+	// Load the CA certificate
+	caCert, err := ioutil.ReadFile("server.pem")
+	if err != nil {
+		return tls.Certificate{}, nil, fmt.Errorf("failed to load CA certificate: %v", err)
+	}
+
+	caCertPool := x509.NewCertPool()
+	caCertPool.AppendCertsFromPEM(caCert)
+	return cert, caCertPool, nil
+}
+
 func main() {
-	// Get coordinator's IP from command line or use default
 	coordinatorAddr := shared.LocalCoordinatorAddr
 	if len(os.Args) > 1 {
-		// Append port if not provided
 		addr := os.Args[1]
 		if _, _, err := net.SplitHostPort(addr); err != nil {
-			// If no port is specified, append the default port
 			addr = addr + ":" + shared.CoordinatorPort
 		}
 		coordinatorAddr = addr
@@ -129,40 +153,51 @@ func main() {
 
 	worker := NewWorker("worker1", coordinatorAddr)
 
-	// Start RPC server
+	// Load TLS configuration
+	cert, caCertPool, err := loadTLSConfig()
+	if err != nil {
+		log.Fatal("TLS configuration error:", err)
+	}
+
 	workerRPC := &WorkerRPC{worker: worker}
 	server := rpc.NewServer()
-	err := server.RegisterName("Worker", workerRPC)
+	err = server.RegisterName("Worker", workerRPC)
 	if err != nil {
 		log.Fatal("Failed to register RPC server:", err)
 	}
 
-	// Listen on all interfaces with a random port
-	listener, err := net.Listen("tcp", "0.0.0.0:0")
+	listener, err := tls.Listen("tcp", "0.0.0.0:0", &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		ClientCAs:    caCertPool,
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+	})
 	if err != nil {
-		log.Fatal("Failed to start listener:", err)
+		log.Fatal("Failed to start TLS listener:", err)
 	}
 
-	// Get the actual address we're listening on
 	workerAddr := listener.Addr().String()
 	log.Printf("Worker listening on %s", workerAddr)
 
 	// Try to connect to coordinator with retries
 	var client *rpc.Client
 	for attempts := 0; attempts < 5; attempts++ {
-		client, err = rpc.Dial("tcp", worker.coordinatorAddr)
+		conn, err := tls.Dial("tcp", worker.coordinatorAddr, &tls.Config{
+			Certificates:       []tls.Certificate{cert},
+			RootCAs:            caCertPool,
+			InsecureSkipVerify: false,
+		})
 		if err == nil {
+			client = rpc.NewClient(conn)
 			break
 		}
 		log.Printf("Attempt %d: Failed to connect to coordinator: %v", attempts+1, err)
 		time.Sleep(2 * time.Second)
 	}
 
-	if err != nil {
-		log.Fatal("Failed to connect to coordinator after retries:", err)
+	if client == nil {
+		log.Fatal("Failed to connect to coordinator after retries")
 	}
 
-	// Register with coordinator
 	registration := shared.WorkerRegistration{
 		ID:      worker.ID,
 		Address: workerAddr,
@@ -177,10 +212,8 @@ func main() {
 
 	log.Printf("Successfully registered with coordinator at %s", worker.coordinatorAddr)
 
-	// Start heartbeat
-	go worker.startHeartbeat()
+	go worker.startHeartbeat(cert, caCertPool)
 
-	// Serve RPC requests
 	go server.Accept(listener)
 
 	select {} // Keep the worker running

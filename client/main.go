@@ -1,7 +1,10 @@
 package main
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net"
 	"net/rpc"
@@ -21,11 +24,35 @@ func NewClient(coordinatorAddr string) *Client {
 	}
 }
 
-func (c *Client) RequestComputation(operation shared.MatrixOperation, matrix1, matrix2 [][]float64) (*shared.Result, error) {
-	client, err := rpc.Dial("tcp", c.coordinatorAddr)
+func (c *Client) loadTLSConfig() (*tls.Config, error) {
+	// Load CA certificate
+	caCert, err := ioutil.ReadFile("server.pem")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to load CA certificate: %v", err)
 	}
+
+	caCertPool := x509.NewCertPool()
+	caCertPool.AppendCertsFromPEM(caCert)
+
+	return &tls.Config{
+		RootCAs:            caCertPool,
+		InsecureSkipVerify: false,
+	}, nil
+}
+
+func (c *Client) RequestComputation(operation shared.MatrixOperation, matrix1, matrix2 [][]float64) (*shared.Result, error) {
+	tlsConfig, err := c.loadTLSConfig()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load TLS config: %v", err)
+	}
+
+	conn, err := tls.Dial("tcp", c.coordinatorAddr, tlsConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to coordinator: %v", err)
+	}
+	defer conn.Close()
+
+	client := rpc.NewClient(conn)
 	defer client.Close()
 
 	taskID := fmt.Sprintf("task-%d", time.Now().UnixNano())
@@ -37,14 +64,14 @@ func (c *Client) RequestComputation(operation shared.MatrixOperation, matrix1, m
 	}
 
 	// Submit the task
-	var reply shared.Result
-	err = client.Call("Coordinator.SubmitTask", &task, &reply)
+	var submitReply bool
+	err = client.Call("Coordinator.SubmitTask", task, &submitReply)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to submit task: %v", err)
 	}
 
 	// Poll for results
-	for i := 0; i < 30; i++ { // Try for 30 seconds
+	for i := 0; i < 30; i++ { // Retry for 30 seconds
 		var result shared.Result
 		err = client.Call("Coordinator.GetResult", taskID, &result)
 		if err == nil {
@@ -59,10 +86,8 @@ func (c *Client) RequestComputation(operation shared.MatrixOperation, matrix1, m
 func main() {
 	var serverAddr string
 	if len(os.Args) > 1 {
-		// Check if the address already includes a port
 		addr := os.Args[1]
 		if _, _, err := net.SplitHostPort(addr); err != nil {
-			// If no port is specified, append the default port
 			serverAddr = addr + ":" + shared.CoordinatorPort
 		} else {
 			serverAddr = addr
@@ -77,11 +102,16 @@ func main() {
 	fmt.Printf("Connecting to coordinator at %s...\n", serverAddr)
 
 	// Test connection
-	testClient, err := rpc.Dial("tcp", serverAddr)
+	tlsConfig, err := client.loadTLSConfig()
+	if err != nil {
+		log.Fatalf("Failed to load TLS config: %v", err)
+	}
+
+	testConn, err := tls.Dial("tcp", serverAddr, tlsConfig)
 	if err != nil {
 		log.Fatalf("Failed to connect to coordinator: %v", err)
 	}
-	testClient.Close()
+	testConn.Close()
 	fmt.Println("Successfully connected to coordinator!")
 
 	// Example matrices
@@ -99,7 +129,7 @@ func main() {
 	fmt.Println("\nMatrix 2:")
 	printMatrix(matrix2)
 
-	fmt.Println("\nPerforming matrix Addition...")
+	fmt.Println("\nPerforming matrix addition...")
 	result, err := client.RequestComputation(shared.Addition, matrix1, matrix2)
 	if err != nil {
 		log.Fatal("Computation failed:", err)

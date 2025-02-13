@@ -1,9 +1,9 @@
 package main
 
 import (
+	"crypto/tls"
 	"fmt"
 	"log"
-	"net"
 	"net/rpc"
 	"sync"
 	"time"
@@ -11,7 +11,6 @@ import (
 	"matrix-operations/shared"
 )
 
-// WorkerService represents the RPC service exposed by workers
 type WorkerService struct {
 	ID     string
 	client *rpc.Client
@@ -19,7 +18,7 @@ type WorkerService struct {
 
 type Coordinator struct {
 	workers    map[string]*shared.WorkerStatus
-	workerRPCs map[string]*WorkerService // Add this field
+	workerRPCs map[string]*WorkerService
 	taskQueue  []shared.Task
 	results    map[string]shared.Result
 	mu         sync.Mutex
@@ -32,26 +31,25 @@ type CoordinatorService struct {
 func NewCoordinator() *Coordinator {
 	return &Coordinator{
 		workers:    make(map[string]*shared.WorkerStatus),
-		workerRPCs: make(map[string]*WorkerService), // Initialize the map
+		workerRPCs: make(map[string]*WorkerService),
 		results:    make(map[string]shared.Result),
 	}
 }
 
-// RegisterWorker handles worker registration
 func (s *CoordinatorService) RegisterWorker(registration shared.WorkerRegistration, reply *bool) error {
 	s.coord.mu.Lock()
 	defer s.coord.mu.Unlock()
 
-	// Connect to worker's RPC server
 	client, err := rpc.Dial("tcp", registration.Address)
 	if err != nil {
 		return err
 	}
 
 	s.coord.workers[registration.ID] = &shared.WorkerStatus{
-		ID:        registration.ID,
-		Available: true,
-		TaskCount: 0,
+		ID:            registration.ID,
+		Available:     true,
+		TaskCount:     0,
+		LastHeartbeat: time.Now().Unix(),
 	}
 
 	s.coord.workerRPCs[registration.ID] = &WorkerService{
@@ -60,104 +58,91 @@ func (s *CoordinatorService) RegisterWorker(registration shared.WorkerRegistrati
 	}
 
 	*reply = true
+	log.Printf("Worker %s registered at %s", registration.ID, registration.Address)
 	return nil
 }
 
-// SubmitTask handles incoming client requests
 func (s *CoordinatorService) SubmitTask(task *shared.Task, result *shared.Result) error {
 	s.coord.mu.Lock()
 	defer s.coord.mu.Unlock()
 
-	// Add task to queue
 	s.coord.taskQueue = append(s.coord.taskQueue, *task)
+	log.Printf("Task %s added to queue", task.ID)
 
-	// Attempt to assign task to least busy worker
 	s.assignTasks()
-
 	return nil
 }
 
 func (s *CoordinatorService) assignTasks() {
-	// Find least busy worker
-	var leastBusyWorker *shared.WorkerStatus
-	var leastBusyWorkerID string
-	minTasks := int(^uint(0) >> 1) // Max int
+	for len(s.coord.taskQueue) > 0 {
+		var leastBusyWorker *shared.WorkerStatus
+		var leastBusyWorkerID string
+		minTasks := int(^uint(0) >> 1) // Max int
 
-	for id, worker := range s.coord.workers {
-		if worker.Available && worker.TaskCount < minTasks {
-			leastBusyWorker = worker
-			leastBusyWorkerID = id
-			minTasks = worker.TaskCount
+		for id, worker := range s.coord.workers {
+			if worker.Available && worker.TaskCount < minTasks {
+				leastBusyWorker = worker
+				leastBusyWorkerID = id
+				minTasks = worker.TaskCount
+			}
 		}
-	}
 
-	// If we have an available worker and tasks in the queue
-	if leastBusyWorker != nil && len(s.coord.taskQueue) > 0 {
-		// Get the first task from queue
-		task := s.coord.taskQueue[0]
-		s.coord.taskQueue = s.coord.taskQueue[1:]
-
-		// Get worker's RPC client
-		workerRPC, exists := s.coord.workerRPCs[leastBusyWorkerID]
-		if !exists {
-			log.Printf("Worker %s not found in RPC map", leastBusyWorkerID)
+		if leastBusyWorker == nil {
+			log.Println("No available workers to assign tasks.")
 			return
 		}
 
-		// Update worker status
+		task := s.coord.taskQueue[0]
+		s.coord.taskQueue = s.coord.taskQueue[1:]
+
+		workerRPC := s.coord.workerRPCs[leastBusyWorkerID]
 		leastBusyWorker.TaskCount++
 		leastBusyWorker.Available = false
 
-		// Send task to worker asynchronously
-		go func(task shared.Task, workerRPC *WorkerService, workerStatus *shared.WorkerStatus) {
-			var result shared.Result
-			err := workerRPC.client.Call("Worker.ProcessTask", task, &result)
-
-			// Lock for updating coordinator state
-			s.coord.mu.Lock()
-			defer s.coord.mu.Unlock()
-
-			if err != nil {
-				log.Printf("Error processing task on worker %s: %v", workerRPC.ID, err)
-				// Re-queue the task
-				s.coord.taskQueue = append(s.coord.taskQueue, task)
-			} else {
-				// Store the result
-				s.coord.results[task.ID] = result
-			}
-
-			// Update worker status
-			workerStatus.TaskCount--
-			workerStatus.Available = true
-
-			// Try to assign more tasks
-			s.assignTasks()
-		}(task, workerRPC, leastBusyWorker)
+		go s.processTask(task, workerRPC, leastBusyWorker)
 	}
 }
 
-// GetResult allows clients to retrieve their computation results
+func (s *CoordinatorService) processTask(task shared.Task, workerRPC *WorkerService, workerStatus *shared.WorkerStatus) {
+	var result shared.Result
+	err := workerRPC.client.Call("Worker.ProcessTask", task, &result)
+
+	s.coord.mu.Lock()
+	defer s.coord.mu.Unlock()
+
+	if err != nil {
+		log.Printf("Error processing task %s on worker %s: %v", task.ID, workerRPC.ID, err)
+		s.coord.taskQueue = append(s.coord.taskQueue, task)
+	} else {
+		s.coord.results[task.ID] = result
+		log.Printf("Task %s completed by worker %s", task.ID, workerRPC.ID)
+	}
+
+	workerStatus.TaskCount--
+	workerStatus.Available = true
+	s.assignTasks()
+}
+
 func (s *CoordinatorService) GetResult(taskID string, result *shared.Result) error {
 	s.coord.mu.Lock()
 	defer s.coord.mu.Unlock()
 
 	if r, exists := s.coord.results[taskID]; exists {
 		*result = r
-		delete(s.coord.results, taskID) // Clean up after sending
+		delete(s.coord.results, taskID)
 		return nil
 	}
 
 	return fmt.Errorf("result not found for task %s", taskID)
 }
 
-// Heartbeat handles worker heartbeat signals
 func (s *CoordinatorService) Heartbeat(workerID string, reply *bool) error {
 	s.coord.mu.Lock()
 	defer s.coord.mu.Unlock()
 
 	if worker, exists := s.coord.workers[workerID]; exists {
 		worker.LastHeartbeat = time.Now().Unix()
-		worker.Available = true
+		worker.Available = worker.TaskCount == 0 // Only mark as available if not processing tasks
 		*reply = true
 		return nil
 	}
@@ -165,7 +150,6 @@ func (s *CoordinatorService) Heartbeat(workerID string, reply *bool) error {
 	return fmt.Errorf("worker %s not found", workerID)
 }
 
-// Add a method to check for worker timeouts
 func (s *CoordinatorService) checkWorkerTimeouts() {
 	ticker := time.NewTicker(10 * time.Second)
 	for range ticker.C {
@@ -173,16 +157,9 @@ func (s *CoordinatorService) checkWorkerTimeouts() {
 		now := time.Now().Unix()
 
 		for id, worker := range s.coord.workers {
-			// If no heartbeat received in 15 seconds, mark worker as unavailable
 			if now-worker.LastHeartbeat > 15 {
 				worker.Available = false
-				log.Printf("Worker %s appears to be offline", id)
-
-				// Reassign any tasks from this worker
-				if worker.TaskCount > 0 {
-					log.Printf("Reassigning tasks from worker %s", id)
-					// TODO: Implement task reassignment logic
-				}
+				log.Printf("Worker %s appears offline", id)
 			}
 		}
 		s.coord.mu.Unlock()
@@ -190,55 +167,31 @@ func (s *CoordinatorService) checkWorkerTimeouts() {
 }
 
 func main() {
-	coordinator := NewCoordinator()
-	service := &CoordinatorService{coord: coordinator}
-
-	go service.checkWorkerTimeouts()
-
-	server := rpc.NewServer()
-	err := server.RegisterName("Coordinator", service)
+	cert, err := tls.LoadX509KeyPair("server.crt", "server.key")
 	if err != nil {
-		log.Fatal("Format of service isn't correct:", err)
+		log.Fatalf("Failed to load server certificate and key: %v", err)
 	}
 
-	// Find the best IP address to use
-	var bestIP string
-	addrs, err := net.InterfaceAddrs()
-	if err == nil {
-		for _, addr := range addrs {
-			if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
-				if ipv4 := ipnet.IP.To4(); ipv4 != nil {
-					// Prefer 192.168.x.x addresses
-					if ipv4[0] == 192 && ipv4[1] == 168 {
-						bestIP = ipv4.String()
-						break
-					}
-					// Otherwise use the first non-loopback IPv4 address
-					if bestIP == "" {
-						bestIP = ipv4.String()
-					}
-				}
-			}
-		}
-	}
-
-	if bestIP == "" {
-		log.Fatal("No suitable network interface found")
-	}
-
-	// Listen on the specific IP
-	listener, err := net.Listen("tcp", "0.0.0.0:1234") // Bind to all interfaces
+	config := &tls.Config{Certificates: []tls.Certificate{cert}}
+	listener, err := tls.Listen("tcp", ":1234", config)
 	if err != nil {
 		log.Fatal("Listen error:", err)
 	}
+	defer listener.Close()
 
-	// Start accepting connections
+	coordinator := NewCoordinator()
+	service := &CoordinatorService{coord: coordinator}
+	rpc.Register(service)
+
+	go service.checkWorkerTimeouts()
+
+	log.Println("Coordinator service running on :1234")
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
 			log.Printf("Accept error: %v", err)
 			continue
 		}
-		go server.ServeConn(conn)
+		go rpc.ServeConn(conn)
 	}
 }
