@@ -2,9 +2,11 @@ package main
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"log"
 	"net/rpc"
+	"os"
 	"sync"
 	"time"
 
@@ -167,12 +169,28 @@ func (s *CoordinatorService) checkWorkerTimeouts() {
 }
 
 func main() {
-	cert, err := tls.LoadX509KeyPair("server.crt", "server.key")
+	// Load CA cert
+	caCert, err := os.ReadFile("./certs/ca.crt")
+	if err != nil {
+		log.Fatalf("Failed to load CA certificate: %v", err)
+	}
+	caCertPool := x509.NewCertPool()
+	caCertPool.AppendCertsFromPEM(caCert)
+
+	// Load server cert and key
+	cert, err := tls.LoadX509KeyPair(
+		"./certs/server.crt",
+		"./certs/server.key",
+	)
 	if err != nil {
 		log.Fatalf("Failed to load server certificate and key: %v", err)
 	}
 
-	config := &tls.Config{Certificates: []tls.Certificate{cert}}
+	config := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		ClientCAs:    caCertPool,
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+	}
 	listener, err := tls.Listen("tcp", ":1234", config)
 	if err != nil {
 		log.Fatal("Listen error:", err)

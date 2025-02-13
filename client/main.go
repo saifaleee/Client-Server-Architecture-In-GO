@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
-	"net"
 	"net/rpc"
 	"os"
 	"time"
@@ -84,34 +83,37 @@ func (c *Client) RequestComputation(operation shared.MatrixOperation, matrix1, m
 }
 
 func main() {
-	var serverAddr string
-	if len(os.Args) > 1 {
-		addr := os.Args[1]
-		if _, _, err := net.SplitHostPort(addr); err != nil {
-			serverAddr = addr + ":" + shared.CoordinatorPort
-		} else {
-			serverAddr = addr
-		}
-	} else {
-		fmt.Println("Usage: go run main.go <server-ip>")
-		fmt.Println("Example: go run main.go 192.168.1.100")
-		os.Exit(1)
-	}
-
-	client := NewClient(serverAddr)
-	fmt.Printf("Connecting to coordinator at %s...\n", serverAddr)
-
-	// Test connection
-	tlsConfig, err := client.loadTLSConfig()
+	// Load CA cert
+	caCert, err := os.ReadFile("./certs/ca.crt")
 	if err != nil {
-		log.Fatalf("Failed to load TLS config: %v", err)
+		log.Fatalf("Failed to load CA certificate: %v", err)
+	}
+	caCertPool := x509.NewCertPool()
+	caCertPool.AppendCertsFromPEM(caCert)
+
+	// Load client cert and key
+	cert, err := tls.LoadX509KeyPair(
+		"./certs/client.crt",
+		"./certs/client.key",
+	)
+	if err != nil {
+		log.Fatalf("Failed to load client certificate and key: %v", err)
 	}
 
-	testConn, err := tls.Dial("tcp", serverAddr, tlsConfig)
-	if err != nil {
-		log.Fatalf("Failed to connect to coordinator: %v", err)
+	config := &tls.Config{
+		RootCAs:      caCertPool,
+		Certificates: []tls.Certificate{cert},
+		ServerName:   "localhost", // Must match the CN in server certificate
 	}
-	testConn.Close()
+
+	// Use this config when dialing
+	conn, err := tls.Dial("tcp", "localhost:1234", config)
+	if err != nil {
+		log.Fatalf("Failed to connect: %v", err)
+	}
+	defer conn.Close()
+
+	client := NewClient("localhost:1234")
 	fmt.Println("Successfully connected to coordinator!")
 
 	// Example matrices

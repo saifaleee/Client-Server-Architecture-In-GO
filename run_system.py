@@ -72,7 +72,7 @@ def main():
                 worker_num = len(processes)
                 print(f"\nStarting Worker {worker_num}...")
                 if prompt_continue():
-                    processes.append(run_command(f'cd worker && go run main.go -id worker{worker_num}', f'Worker {worker_num}'))
+                    processes.append(run_command(f'cd worker && go run main.go localhost -id worker{worker_num}', f'Worker {worker_num}'))
                     print(f"Worker {worker_num} started!")
                     time.sleep(2)
                 else:

@@ -3,20 +3,20 @@ package main
 import (
 	"crypto/tls"
 	"crypto/x509"
-	"fmt"
-	"io/ioutil"
 	"log"
+	"matrix-operations/shared"
 	"net"
 	"net/rpc"
 	"os"
 	"time"
-
-	"matrix-operations/shared"
 )
+
+const maxRetries = 5
 
 type Worker struct {
 	ID              string
 	coordinatorAddr string
+	client          *rpc.Client
 }
 
 type WorkerRPC struct {
@@ -96,13 +96,14 @@ func (w *Worker) ProcessTask(task shared.Task) shared.Result {
 }
 
 func (w *Worker) startHeartbeat(cert tls.Certificate, caCertPool *x509.CertPool) {
+	config := &tls.Config{
+		Certificates:       []tls.Certificate{cert},
+		RootCAs:            caCertPool,
+		InsecureSkipVerify: true,
+	}
 	ticker := time.NewTicker(5 * time.Second)
 	for range ticker.C {
-		conn, err := tls.Dial("tcp", w.coordinatorAddr, &tls.Config{
-			Certificates:       []tls.Certificate{cert},
-			RootCAs:            caCertPool,
-			InsecureSkipVerify: false,
-		})
+		conn, err := tls.Dial("tcp", w.coordinatorAddr, config)
 		if err != nil {
 			log.Printf("Failed to connect to coordinator: %v", err)
 			continue
@@ -123,40 +124,52 @@ func (w *WorkerRPC) ProcessTask(task shared.Task, result *shared.Result) error {
 	return nil
 }
 
-func loadTLSConfig() (tls.Certificate, *x509.CertPool, error) {
-	// Load the worker's certificate and private key
-	cert, err := tls.LoadX509KeyPair("server.pem", "server.pem")
-	if err != nil {
-		return tls.Certificate{}, nil, fmt.Errorf("failed to load worker certificate: %v", err)
-	}
-
-	// Load the CA certificate
-	caCert, err := ioutil.ReadFile("server.pem")
-	if err != nil {
-		return tls.Certificate{}, nil, fmt.Errorf("failed to load CA certificate: %v", err)
-	}
-
-	caCertPool := x509.NewCertPool()
-	caCertPool.AppendCertsFromPEM(caCert)
-	return cert, caCertPool, nil
-}
-
 func main() {
 	coordinatorAddr := shared.LocalCoordinatorAddr
 	if len(os.Args) > 1 {
-		addr := os.Args[1]
-		if _, _, err := net.SplitHostPort(addr); err != nil {
-			addr = addr + ":" + shared.CoordinatorPort
+		coordinatorAddr = os.Args[1]
+		if _, _, err := net.SplitHostPort(coordinatorAddr); err != nil {
+			coordinatorAddr = coordinatorAddr + ":" + shared.CoordinatorPort
 		}
-		coordinatorAddr = addr
+	}
+
+	// Load certificates
+	cert, err := tls.LoadX509KeyPair("./certs/worker.crt", "./certs/worker.key")
+	if err != nil {
+		log.Fatalf("Failed to load worker certificate and key: %v", err)
+	}
+
+	caCert, err := os.ReadFile("./certs/ca.crt")
+	if err != nil {
+		log.Fatalf("Failed to load CA certificate: %v", err)
+	}
+
+	caCertPool := x509.NewCertPool()
+	if !caCertPool.AppendCertsFromPEM(caCert) {
+		log.Fatal("Failed to append CA certificate")
+	}
+
+	tlsConfig := &tls.Config{
+		Certificates:       []tls.Certificate{cert},
+		RootCAs:            caCertPool,
+		InsecureSkipVerify: true,
 	}
 
 	worker := NewWorker("worker1", coordinatorAddr)
 
-	// Load TLS configuration
-	cert, caCertPool, err := loadTLSConfig()
-	if err != nil {
-		log.Fatal("TLS configuration error:", err)
+	// Update the connection logic to use the TLS config
+	for attempts := 1; attempts <= maxRetries; attempts++ {
+		conn, err := tls.Dial("tcp", coordinatorAddr, tlsConfig)
+		if err != nil {
+			log.Printf("Attempt %d: Failed to connect to coordinator: %v\n", attempts, err)
+			if attempts == maxRetries {
+				log.Fatal("Failed to connect after maximum retries")
+			}
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		worker.client = rpc.NewClient(conn)
+		break
 	}
 
 	workerRPC := &WorkerRPC{worker: worker}
@@ -166,10 +179,12 @@ func main() {
 		log.Fatal("Failed to register RPC server:", err)
 	}
 
+	// Create listener with proper TLS config
 	listener, err := tls.Listen("tcp", "0.0.0.0:0", &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		ClientCAs:    caCertPool,
-		ClientAuth:   tls.RequireAndVerifyClientCert,
+		Certificates:       []tls.Certificate{cert},
+		ClientCAs:          caCertPool,
+		ClientAuth:         tls.RequireAndVerifyClientCert,
+		InsecureSkipVerify: true,
 	})
 	if err != nil {
 		log.Fatal("Failed to start TLS listener:", err)
@@ -178,42 +193,20 @@ func main() {
 	workerAddr := listener.Addr().String()
 	log.Printf("Worker listening on %s", workerAddr)
 
-	// Try to connect to coordinator with retries
-	var client *rpc.Client
-	for attempts := 0; attempts < 5; attempts++ {
-		conn, err := tls.Dial("tcp", worker.coordinatorAddr, &tls.Config{
-			Certificates:       []tls.Certificate{cert},
-			RootCAs:            caCertPool,
-			InsecureSkipVerify: false,
-		})
-		if err == nil {
-			client = rpc.NewClient(conn)
-			break
-		}
-		log.Printf("Attempt %d: Failed to connect to coordinator: %v", attempts+1, err)
-		time.Sleep(2 * time.Second)
-	}
-
-	if client == nil {
-		log.Fatal("Failed to connect to coordinator after retries")
-	}
-
 	registration := shared.WorkerRegistration{
 		ID:      worker.ID,
 		Address: workerAddr,
 	}
 
 	var reply bool
-	err = client.Call("Coordinator.RegisterWorker", registration, &reply)
+	err = worker.client.Call("Coordinator.RegisterWorker", registration, &reply)
 	if err != nil {
 		log.Fatal("Failed to register worker:", err)
 	}
-	client.Close()
 
 	log.Printf("Successfully registered with coordinator at %s", worker.coordinatorAddr)
 
 	go worker.startHeartbeat(cert, caCertPool)
-
 	go server.Accept(listener)
 
 	select {} // Keep the worker running
